@@ -2,6 +2,8 @@
 
 [![build_and_tests](https://github.com/jkbhagatio/nanoGPT/actions/workflows/build_env_run_tests.yml/badge.svg)](https://github.com/jkbhagatio/nanoGPT/actions/workflows/build_env_run_tests.yml)
 
+[![codecov coverage](https://codecov.io/gh/jkbhagatio/nanoGPT/graph/badge.svg?token=HxfQTpcSZR)](https://codecov.io/gh/jkbhagatio/nanoGPT)
+
 A minimal (nanomal?) repository containing code for building, training, and running nanoGPT: a nano-version of OpenAI's GPT-3 Decoder-only Transformer, following this tutorial from Andrej Karpathy: https://www.youtube.com/watch?v=kCc8FmEb1nY
 
 A trained nanoGPT using this codebase acts only as a character-level text-completer (i.e. the end of the "pretraining stage" in typical Large Language Model development, here with tokens as only single characters).
