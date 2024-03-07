@@ -51,11 +51,10 @@ Output generated from models trained after approximately 320000 (top), 640000 (m
 
 ### Run a pretrained nanoGPT model
 
-1. Download a pretrained nanoGPT pytorch model (.pth), its config file (.json), and its tokens file (.json) from [here](https://drive.google.com/drive/folders/1M99XHrX31O8opWYHzTnvVBwEkYadH5ct?usp=sharing) <br>
+1. Download a pretrained nanoGPT pytorch model (.pth), its config file (.json), and its tokens file (.json) from [here](https://drive.google.com/drive/folders/1M99XHrX31O8opWYHzTnvVBwEkYadH5ct?usp=sharing)
 (e.g. `nanogpt_shakespeare.pth`, `nanogpt_shakespeare_config.json`, `tiny_shakespeare_tokens.txt`) 
-<br>
 and _**save them in a new directory with no other files**_.
-2. Then, in the terminal within this directory with the python environment activated, 
+2. Then, in the terminal in this repository's directory with the python environment activated, 
 ```bash
 python -m nanogpt --model-dir "<path/to/downloaded_files/>" --in-txt "Wherefore art thou, Romeo? We are such stuff as dreams are made on. The course of true love never did run smooth." --n-tokens 200
 ```
