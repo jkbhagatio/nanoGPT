@@ -21,7 +21,7 @@ jobs:
           python -m venv env
           source env/bin/activate
           python -m pip install -e .
-          python -m pytest -n auto --cov=nanogpt --cov-report=xml
+          python -m pytest --cov=nanogpt --cov-report=xml
       - name: Upload test coverage report to codecov
         uses: codecov/codecov-action@v4
         with:
