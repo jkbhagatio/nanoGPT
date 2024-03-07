@@ -1,0 +1,128 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# See https://setuptools.pypa.io/en/latest/userguide/quickstart.html for more project configuration options.
+name = "nanogpt"
+version = "0.1.0"
+readme = "readme.md"
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+authors = [
+    {name = "Jai Bhagat", email = "jkbhagatio@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "black[jupyter]",
+    "ipdb",
+    "ipykernel",
+    "isort",
+    "jupyter",
+    "jupyterlab",
+    "matplotlib",
+    "numpy",
+    "optuna",
+    "pyright",
+    "pytest",
+    "pytest-cov",
+    "pytest-sphinx",
+    "ruff",
+    "scikit-learn",
+    "scipy",
+    "setuptools",
+    "tiktoken",
+    "torch",
+    "tqdm",
+    "twine",
+    "wandb",
+    "wheel",
+]
+license = {file = "license.md"}
+
+[project.urls]
+Homepage = "https://github.com/jkbhagatio/nanogpt"
+Repository = "https://github.com/jkbhagatio/nanogpt"
+
+[project.optional-dependencies]
+dev = [
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "nanogpt.version.VERSION"}
+
+[tool.black]
+line-length = 100
+color = false
+exclude = '''
+/(
+    \.git
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | build
+    | dist
+    | env
+    | venv
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 2
+
+[tool.ruff]
+select = ["E", "W", "F", "I", "D", "UP", "S", "B", "A", "C4", "ICN", "PIE", "PT", "SIM", "PL"]
+line-length = 100
+ignore = [
+    "E201", "E202", "E203", "E231", "E731", "E702",
+    "S101",
+    "PT013",
+    "PLR0912", "PLR0913", "PLR0915"
+]
+extend-exclude = [".git", ".github", ".idea", ".vscode"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.pyright]
+reportMissingImports = "none"
+reportImportCycles = "error"
+reportUnusedImport = "error"
+reportUnusedClass = "error"
+reportUnusedfunction = "error"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+reportWildcardImportFromLibrary = "error"
+reportPrivateUsage = "error"
+reportCallInDefaultInitializer = "error"
+reportUnnecessaryIsInstance = "error"
+reportUnnecesaryCast = "error"
+reportUnnecesarryComparison = "error"
+reportUnnecessaryContains = "error"
+reportAssertAlwaysTrue = "error"
+reportSelfClsParameterName = "error"
+reportUnusedExpression = "error"
+reportMatchNotExhaustive = "error"
+reportShadowedImports = "error"
+# *Note*: we may want to set all 'ReportOptional*' rules to "none", but leaving 'em default for now
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = "tests"
+python_classes = [
+  "Test*",
+  "*Test"
+]
+log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+log_level = "DEBUG"

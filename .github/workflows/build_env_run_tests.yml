@@ -1,0 +1,32 @@
+name: build_env_run_tests
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows running manually from Github's 'Actions' tab
+jobs:
+  build_env_run_tests:
+    name: Build env and run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      - name: Set up environment
+        run: |
+          python -m venv env
+          source env/bin/activate
+          python -m pip install -e .
+      - name: Pytest with coverage report
+        run: |
+          python -m pytest -n auto --cov=nanogpt --cov-report=xml
+      - name: Upload test coverage report to codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          verbose: true
