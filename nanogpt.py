@@ -145,9 +145,9 @@ class NanoGPT(nn.Module):
             self.emb_dim,
             self.ff_dim,
         ) = (n_tokens, ctx_len, n_blocks, n_heads, head_sz, emb_dim, ff_dim)
-        if (emb_dim / n_heads / head_sz) != 1:
+        if (n_heads * head_sz / emb_dim) != 1:
             warn(
-                f"Ratio of n_heads and head_sz to emb_dim ({emb_dim / n_heads / head_sz}) is not 1",
+                f"Ratio of n_heads X head_sz to emb_dim ({(n_heads * head_sz / emb_dim)}) is not 1",
                 stacklevel=1
             )
         self.tok_emb = nn.Embedding(n_tokens, emb_dim)  # to learn token embeddings
