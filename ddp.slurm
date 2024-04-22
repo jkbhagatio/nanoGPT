@@ -5,6 +5,8 @@
 #SBATCH --gres=gpu:2  # 2 gpus per node
 #SBATCH --ntasks=4    # 4 processes per job
 #SBATCH --array=0-26%3  # 27 jobs, max 3 in parallel (27 unique models, given hyperparemeter configurations)
+#SBATCH --output=~/nanogpt_ddp_runs/job_%j.out
+#SBATCH --error=~/nanogpt_ddp_runs/job_%j.err
 
 # Set first node as the master
 MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
