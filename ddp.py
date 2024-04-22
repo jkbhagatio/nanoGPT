@@ -23,7 +23,7 @@ from nanogpt import NanoGPT, build_dataset
 LR_SET = [5e-2, 1e-3, 1e-4]  # learning rate set
 OPTIM_SET = [Adam, AdamW, NAdam]  # optimizer set
 ARCH_SET = [  # model architecture set
-    {"ctx_len": 256, "emb_dim": 256, "n_heads": 8, "head_sz": 32, "n_blocks": 8},
+    {"ctx_len": 2048, "emb_dim": 768, "n_heads": 12, "head_sz": 64, "n_blocks": 12},
     {"ctx_len": 2048, "emb_dim": 1024, "n_heads": 16, "head_sz": 64, "n_blocks": 12},
     {"ctx_len": 2048, "emb_dim": 1024, "n_heads": 20, "head_sz": 80, "n_blocks": 12},
 ]
@@ -38,7 +38,7 @@ def setup(
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
     # Create distributed process group.
-    init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 def cleanup():
     """Cleans up and kills DDP environment."""
@@ -53,7 +53,7 @@ def train(
     loss_fn: nn.modules.loss,  # loss function
     rank: int,  # rank of current process
     max_epochs: int = 5,  # max n training epochs
-    max_batches: int = 500,  # max n batches to train
+    max_batches: int = 1e9,  # max n batches to train
     val_chk_interval: int = 200,  # check val loss every `val_chk_interval` batches & print losses
     val_iter: int = 5,  # number of batches on val_loader to run and avg when computing val loss
     patience_thresh: int = 1e9,  # consecutive batches without val loss decrease for early stopping
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--world-size", type=int, required=True, help="Number of processes to use for DDP."
     )
-    #parser.add_argument("--rank", type=int, required=True, help="Rank of current process.")
+    parser.add_argument("--rank", type=int, required=True, help="Rank of current process.")
     parser.add_argument(
         "--master-addr", type=str, required=True, help="Master address (or hostname) for DDP."
     )
@@ -274,15 +274,18 @@ if __name__ == "__main__":
     train_configs = list(product(LR_SET, OPTIM_SET, ARCH_SET))
     train_config = train_configs[args.train_config_idx]
     # Run DDP training.
-    mp.spawn(  # passes `rank` to `main` as first arg automatically
-        main,
-        args=(
-            args.world_size,
-            args.master_addr,
-            args.master_port,
-            args.text_file,
-            train_config,
-        ),
-        nprocs=args.world_size,
-        join=True,
-    )
+    main(args.rank, args.world_size, args.master_addr, args.master_port, args.text_file, train_config)
+
+    # Use `mp.spawn` and 'gloo' (as backend device comm library) for local testing.
+    # mp.spawn(  # passes `rank` to `main` as first arg automatically
+    #     main,
+    #     args=(
+    #         args.world_size,
+    #         args.master_addr,
+    #         args.master_port,
+    #         args.text_file,
+    #         train_config,
+    #     ),
+    #     nprocs=args.world_size,
+    #     join=True,
+    # )
