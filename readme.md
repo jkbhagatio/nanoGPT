@@ -12,6 +12,9 @@ Multi-head self-attention is implemented "from scratch", at the level of pytorch
 
 While the overall architecture is similar, this nanoGPT makes departures from Karpathy's nanoGPT in: naming conventions, data loading and training configuration, projecting embedding dimensions to attention heads, the format of operations in self-attention units and transformer blocks, output model generation (by adding parameters such as `temp` and `top_k`), and more.
 
+Additionally, examples of distributed training of models across multiple GPUs using PyTorch
+Distributed Data Parallel (DDP) and Fully Sharded Data Parallel (FSDP) via Slurm can be found in the `ddp_and_fsdp` directory.
+
 ## Examples
 
 ### nanoGPT-Shakespeare
@@ -40,6 +43,10 @@ Output generated from models trained after approximately 320000 (top), 640000 (m
 - `data/` contains the works of Shakespeare and Austen in .txt format, which can be used to train nanoGPT.
 
 - `tests/` contains tests that can be run via pytest for verifying components of nanoGPT work as expected.
+
+- `ddp_and_fsdp/` contains python modules and slurm scripts for:
+    - 1: speeding up training of a single model across multiple GPUs via model copying and distributed batching using DDP.
+    - 2: training a single large model across multiple GPUs via sharding using FSDP.
 
 - `.github/workflows/` contains a github actions workflow for building the python environment, running tests, and uploading the results to codecov.
 
@@ -75,7 +82,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Import nanogpt
 nanogpt_dir = Path.cwd()
-sys.path.append(nanogpt_dir)
+sys.path.append(str(nanogpt_dir))
 import nanogpt
 
 # Load in text file to train on and build dataloaders
