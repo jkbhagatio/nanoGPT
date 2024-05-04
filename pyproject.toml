@@ -53,6 +53,9 @@ Repository = "https://github.com/jkbhagatio/nanogpt"
 dev = [
 ]
 
+[tool.setuptools]
+packages = { find = { where = ["."], exclude = ["data*", "ddp_and_fsdp*"] } }
+
 [tool.setuptools.dynamic]
 version = {attr = "nanogpt.version.VERSION"}
 

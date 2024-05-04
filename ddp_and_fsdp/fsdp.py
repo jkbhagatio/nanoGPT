@@ -1,47 +1,47 @@
-"""Runs distributed training of NanoGPTs across multiple GPUs using PyTorch's DDP."""
+"""Runs distributed training of a sharded NanoGPT across multiple GPUs using PyTorch's FSDP."""
 
 import argparse  # noqa: I001
 import os
 import sys
 import time
-from itertools import product
 from pathlib import Path
 
 import numpy as np
 import torch
 import wandb
-from torch import multiprocessing as mp
-from torch import nn, optim
 from torch.distributed import destroy_process_group, init_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import Adam, AdamW, NAdam
+from torch.distributed.fsdp import (FullyShardedDataParallel as FSDP, ShardingStrategy)
+from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 # Import nanogpt from relative directory.
 nanogpt_dir = Path.cwd().parent
 sys.path.append(str(nanogpt_dir))
-from nanogpt import NanoGPT, build_dataset
+from nanogpt import NanoGPT, build_dataset  # noqa: E402, I001
 
-# Hyperparameters for model setup.
-LR_SET = [5e-2, 1e-3, 1e-4]  # learning rate set
-OPTIM_SET = [Adam, AdamW, NAdam]  # optimizer set
-ARCH_SET = [  # model architecture set
-    {"ctx_len": 2048, "emb_dim": 768, "n_heads": 12, "head_sz": 64, "n_blocks": 12},
-    {"ctx_len": 2048, "emb_dim": 1024, "n_heads": 16, "head_sz": 64, "n_blocks": 12},
-    {"ctx_len": 2048, "emb_dim": 1024, "n_heads": 20, "head_sz": 80, "n_blocks": 12},
-]
+
+CTX_LEN = 512
+EMB_DIM = 2048
+N_BLOCKS = 24
+N_HEADS = 24
+HEAD_SZ = 128
+BATCH_SZ = 4
+LR = 1e-4
+
 
 def setup(backend: str):
-    """Sets up the DDP environment."""
+    """Sets up the FSDP environment."""
     # Create distributed process group and set cuda device according to torchrun LOCAL_RANK env var.
     init_process_group(backend=backend)
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
+
 def cleanup():
-    """Cleans up and kills DDP environment."""
+    """Cleans up and kills FSDP environment."""
     destroy_process_group()
     wandb.finish()
+
 
 def train(
     model: nn.Module,  # model
@@ -52,7 +52,7 @@ def train(
     global_rank: int,  # rank of current process across all nodes
     local_rank: int,  # rank of current process within node
     max_epochs: int = 5,  # max n training epochs
-    max_batches: int = 1000,  # max n batches to train
+    max_batches: int = 500,  # max n batches to train
     val_chk_interval: int = 200,  # check val loss every `val_chk_interval` batches & print losses
     val_iter: int = 5,  # number of batches on val_loader to run and avg when computing val loss
     patience_thresh: int = 1e9,  # consecutive batches without val loss decrease for early stopping
@@ -60,6 +60,7 @@ def train(
     save_chkpt_thresh: float = 0.5,  # save model chkpnt every `save_chkpt_interval` loss decrease
 ) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:  # -> loss, train_losses, val_losses
     """Trains a model, returns loss."""
+
     # <s Nested helper functions to make `train` more readable.
     @torch.no_grad()
     def estimate_losses(
@@ -91,9 +92,10 @@ def train(
                     )
                     # Centralize the gradient
                     param.grad.data -= grad_mean
+
     # /s>
     # <s Trackers
-    _ctx_len, n_tokens  = model.module.ctx_len, model.module.n_tokens
+    _ctx_len, n_tokens = model.module.ctx_len, model.module.n_tokens
     _batch_sz, n_batches = train_loader.batch_size, len(train_loader)
     batch_lim = min(max_batches, n_batches * max_epochs)
     patience_thresh *= val_chk_interval  # convert to batches within model validation block
@@ -150,7 +152,7 @@ def train(
             ):
                 torch.save(
                     model.module.state_dict(),
-                    Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth"
+                    Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth",
                 )
                 init_loss = loss.item()
             # /ss>
@@ -164,7 +166,7 @@ def train(
                 wandb.log(
                     {
                         "completed_batches": n_comp_batches,
-                        "estimated_time_remaining": est_remaining_t
+                        "estimated_time_remaining": est_remaining_t,
                     }
                 )
             # /ss> /s>
@@ -175,69 +177,89 @@ def train(
                 "train_loss": train_losses_avg[-1],
                 "val_loss": val_losses_avg[-1],
                 "completed_batches": n_comp_batches,
-                "estimated_time_remaining": est_remaining_t
+                "estimated_time_remaining": est_remaining_t,
             }
         )
     if Path(save_chkpt_dir).exists() and local_rank == 0:
         torch.save(
             model.module.state_dict(),
-            Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth"
+            Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth",
         )
     return loss, train_losses_avg, val_losses_avg
 
+
 def main(
-    backend: str,  # DDP backend to use
+    backend: str,  # FSDP backend to use
     global_rank: int,  # rank of current process across all nodes
     local_rank: int,  # rank of current process within node
     text_file: str,  # path to text file to train on
-    train_config: tuple[float, optim.Optimizer, list[dict]],  # lr, optimizer, model config
 ):
     """Main function to run distributed training.
 
     Sets up DDP env, creates dataset from text file, creates and trains model, cleans up DDP env.
     """
-    # Set up DDP environment.
+    # Set up FSDP environment.
     setup(backend)
     # Set up dataset.
     with open(text_file) as f:
         text = f.read()
     tokens = sorted(set(text))
-    X, Y = build_dataset(text_file, ctx_len=train_config[2]["ctx_len"])
+    X, Y = build_dataset(text_file, ctx_len=CTX_LEN)
     dataset = TensorDataset(X, Y)
     train_data, val_data = random_split(dataset, [0.9, 0.1])
     train_loader = DataLoader(
-        train_data, batch_size=32, shuffle=False, sampler=DistributedSampler(train_data)
+        train_data, batch_size=BATCH_SZ, shuffle=False, sampler=DistributedSampler(train_data)
     )
     val_loader = DataLoader(
-        val_data, batch_size=32, shuffle=False, sampler=DistributedSampler(val_data)
+        val_data, batch_size=BATCH_SZ, shuffle=False, sampler=DistributedSampler(val_data)
     )
     # Set up model.
-    model = NanoGPT(n_tokens=len(tokens), **train_config[2]).to(local_rank)
-    model = DDP(model, device_ids=[local_rank])
+    model = NanoGPT(
+        n_tokens=len(tokens),
+        ctx_len=CTX_LEN,
+        emb_dim=EMB_DIM,
+        n_blocks=N_BLOCKS,
+        n_heads=N_HEADS,
+        head_sz=HEAD_SZ
+    ).to(local_rank)
+    model = FSDP(model, sharding_strategy=ShardingStrategy.FULL_SHARD)
     # Initialize wandb config and run.
     param_bytes = 4  # 32-bit floats
     bytes_in_gb = 1024**3
     n_tot_params = sum(p.numel() for p in model.parameters())
     n_tot_params_b = round(n_tot_params / 1e9, 3)
     tot_sz_gb = n_tot_params * param_bytes / bytes_in_gb
-    run_name = f"{train_config[1].__name__}-{train_config[0]}_{n_tot_params_b}B"
+    run_name = f"NADAMW-1e-4_{n_tot_params_b}B"
     if global_rank == 0:
         wandb_config = {
             "n_params_bil": n_tot_params_b,
             "sz_gb": tot_sz_gb,
-            "lr": train_config[0],
-            "optim": train_config[1],
+            "lr": LR,
+            "optim": "NADAMW",
             "completed_batches": 0,
             "expected_total_batches": None,  # set in `train` function
             "estimated_time_remaining": None,  # set in `train` function
         }
-        wandb_config.update(train_config[2])
+        model_arch_config = {
+            "ctx_len": CTX_LEN,
+            "emb_dim": EMB_DIM,
+            "n_blocks": N_BLOCKS,
+            "n_heads": N_HEADS,
+            "head_sz": HEAD_SZ,
+        }
+        wandb_config.update(model_arch_config)
         # name: <optim>-<lr>_<n_tot_params_b>; e.g. Adam-0.005_0.122B
-        wandb.init(project="NanoGPT-DDP", entity="jkbhagatio", name=run_name, config=wandb_config)
+        wandb.init(project="NanoGPT-FSDP", entity="jkbhagatio", name=run_name, config=wandb_config)
     # Run training.
-    optimizer = train_config[1](model.parameters(), lr=train_config[0])
+    optimizer = optim.NAdam(
+        model.parameters(),
+        lr=1e-4,
+        weight_decay=1e-8,
+        momentum_decay=1e-4,
+        decoupled_weight_decay=True
+    )
     loss_fn = nn.CrossEntropyLoss()
-    save_chkpt_dir = Path.home() / "nanogpt_ddp_runs" / "chkpts" / run_name
+    save_chkpt_dir = Path.home() / "nanogpt_fsdp_runs" / "chkpts" / run_name
     train(
         model,
         train_loader,
@@ -246,40 +268,32 @@ def main(
         loss_fn,
         global_rank,
         local_rank,
-        save_chkpt_dir=save_chkpt_dir
+        save_chkpt_dir=save_chkpt_dir,
     )
-    # Clean up DDP environment.
+    # Clean up FSDP environment.
     cleanup()
+
 
 # Run training.
 # 'config_idx', 'world_size', 'rank', 'MASTER_ADDR', and 'MASTER_PORT' set in slurm script.
 if __name__ == "__main__":
     # Parse args.
-    parser = argparse.ArgumentParser(description="Run DDP distributed training of NanoGPTs.")
+    parser = argparse.ArgumentParser(description="Run FSDP distributed training of NanoGPT.")
     parser.add_argument(
-        "--ddp_backend",
+        "--fsdp_backend",
         type=str,
         default="nccl",
-        help="DDP backend to use (typically 'nccl' on Unix-like system, 'gloo' on Windows)."
-    )
-    parser.add_argument(
-        "--train_config_idx",
-        type=int,
-        required=True,
-        help="Index of train config to run. (See `train_configs` var)"
+        help="FSDP backend to use (typically 'nccl' on Unix-like system, 'gloo' on Windows).",
     )
     parser.add_argument(
         "--text_file",
         type=str,
         default=(Path.cwd().parent / "data/tiny_austen.txt"),
-        help="Path to text file to train on."
+        help="Path to text file to train on.",
     )
     args = parser.parse_args()
     # Get ranks from torchrun env vars.
     global_rank = int(os.environ["RANK"])  # rank of current process across all nodes
-    local_rank = int(os.environ["LOCAL_RANK"])  # rank of current process within node
-    # Set training config.
-    train_configs = list(product(LR_SET, OPTIM_SET, ARCH_SET))
-    train_config = train_configs[args.train_config_idx]
-    # Run DDP training.
-    main(args.ddp_backend, global_rank, local_rank, args.text_file, train_config)
+    local_rank = int(os.environ["LOCAL_RANK"])  # rank of current process within node.
+    # Run FSDP training.
+    main(args.fsdp_backend, global_rank, local_rank, args.text_file)
