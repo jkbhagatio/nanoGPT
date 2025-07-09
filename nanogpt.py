@@ -129,7 +129,7 @@ class MultiHead(nn.Module):
             attn_out.transpose(1, 2).reshape(batch_sz, seq_len, self.n_heads_dim)
         )
         # Apply output projection
-        attn_out: Float[Tensor, "batch_sz seq_len emb_dim"] = self.proj(attn_out)
+        attn_out: Float[Tensor, "batch_sz seq_len emb_dim"] = self.proj(attn_out)  # type: ignore
         return attn_out
 
 
@@ -192,7 +192,10 @@ class Block(nn.Module):
         self.ff = Feedforward(emb_dim, ff_dim)  # position-wise feedforward
         self.ff_dropout = nn.Dropout(dropout)  # dropout after feedforward
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+    ) -> Float[Tensor, "batch_sz seq_len emb_dim"]:  # type: ignore
         """Self-attn -> feedforward."""
         # layer-norm -> self-attn -> dropout + residual
         x = x + self.self_attn_dropout(self.self_attn(self.self_attn_ln(x)))
@@ -210,7 +213,7 @@ transformer blocks.
 
 We'll also apply weight init.
 
-We want our output to be [batch_sz, seq_len, n_tokens], because we want to predict the next token
+We want our output to be [batch_sz, seq_len, vocab_sz], because we want to predict the next token
 for each token in the context.
 """
 
@@ -220,8 +223,8 @@ class NanoGPT(nn.Module):
 
     def __init__(
         self,
-        n_tokens,
-        ctx_len=512,
+        vocab_sz,
+        ctx_win=512,
         n_blocks=8,
         n_heads=8,
         head_dim=64,
@@ -232,28 +235,28 @@ class NanoGPT(nn.Module):
         """Init token & pos embeddings, transformer blocks, & norm and out layers."""
         super().__init__()
         (
-            self.n_tokens,
-            self.ctx_len,
+            self.vocab_sz,
+            self.ctx_win,
             self.n_blocks,
             self.n_heads,
             self.head_dim,
             self.emb_dim,
             self.ff_dim,
-        ) = (n_tokens, ctx_len, n_blocks, n_heads, head_dim, emb_dim, ff_dim)
+        ) = (vocab_sz, ctx_win, n_blocks, n_heads, head_dim, emb_dim, ff_dim)
         if (n_heads * head_dim / emb_dim) != 1:
             warn(
                 f"Ratio of n_heads X head_dim to emb_dim "
                 f"{(n_heads * head_dim / emb_dim)}) is not 1",
                 stacklevel=1,
             )
-        self.tok_emb = nn.Embedding(n_tokens, emb_dim)  # to learn token embeddings
-        self.pos_emb = nn.Embedding(ctx_len, emb_dim)  # to learn positional embeddings
+        self.tok_emb = nn.Embedding(vocab_sz, emb_dim)  # to learn token embeddings
+        self.pos_emb = nn.Embedding(ctx_win, emb_dim)  # to learn positional embeddings
         self.blocks = nn.Sequential(  # Transformer blocks
             *[Block(n_heads, head_dim, emb_dim, ff_dim, dropout) for _ in range(n_blocks)]
         )
         self.f_ln = nn.LayerNorm(emb_dim)  # final layer norm
         self.f_dropout = nn.Dropout(dropout)  # final dropout
-        self.out = nn.Linear(emb_dim, n_tokens)
+        self.out = nn.Linear(emb_dim, vocab_sz)  # final (raw) logits
         self.apply(self.xavier_init)
 
     @staticmethod
@@ -262,13 +265,18 @@ class NanoGPT(nn.Module):
         if isinstance(module, nn.Embedding | nn.Linear):
             nn.init.xavier_normal_(module.weight, gain=gain)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: Float[Tensor, "batch_sz seq_len"],  # type: ignore
+    ) -> Float[Tensor, "batch_sz seq_len vocab_sz"]:  # type: ignore
         """Feed pos encodings through transformer blocks and final norm and out layers."""
         _batch_sz, seq_len = x.shape
+
         # Compute positional encodings
         tok_emb = self.tok_emb(x)  # -> [batch_sz, seq_len, emb_dim]
         pos_emb = self.pos_emb.weight[0:seq_len]  # -> [seq_len, emb_dim]
         pos_enc = tok_emb + pos_emb  # -> [batch_sz, seq_len, emb_dim]
+
         # Go through transformer blocks and final linear layer
         logits = self.out(self.f_dropout(self.f_ln(self.blocks(pos_enc))))
         return logits
@@ -279,17 +287,27 @@ class NanoGPT(nn.Module):
 # <s Data loading, training, config, and utility functions
 
 
-def build_dataset(txtfile, ctx_len):
+def build_dataset(
+    txtfile: str | Path, ctx_win: int
+) -> tuple[Float[Tensor, "n_examples ctx_win"], Int[Tensor, "n_examples ctx_win"]]:  # type: ignore
     """Build dataset from text file."""
+    # Get tokens
     with open(txtfile) as f:
         text = f.read()
     tokens = sorted(set(text))
+
+    # Encode tokens
     token_to_int = {t: i for i, t in enumerate(tokens)}
     encode = lambda tokens: [token_to_int[t] for t in tokens]
     data = t.tensor(encode(text), dtype=t.long)
+
+    # Create X, Y pairs
     n_chars = len(text)
-    n_examples = n_chars - ctx_len
-    idxs = t.arange(ctx_len + 1).unsqueeze(0) + t.arange(n_examples).unsqueeze(1)
+    n_examples = n_chars - ctx_win
+    idxs: Int[Tensor, "n_examples ctx_win"] = (  # type: ignore
+        t.arange(ctx_win + 1).unsqueeze(0) + t.arange(n_examples).unsqueeze(1)
+    )
+    # seq 'n' in Y is matched with seq 'n-1' in X
     X, Y = data[idxs[:, :-1]], data[idxs[:, 1:]]
     return X, Y
 
@@ -355,7 +373,7 @@ def train(
         model.eval()
         for val_i, (x_val, y_val) in enumerate(val_loader):
             logits = model(x_val.to(device))
-            val_loss = loss_fn(logits.view(-1, n_tokens), y_val.to(device).view(-1))
+            val_loss = loss_fn(logits.view(-1, vocab_sz), y_val.to(device).view(-1))
             val_losses.append(val_loss.item())
             if val_i >= (val_iter - 1):
                 break
@@ -366,7 +384,7 @@ def train(
     # /s>
 
     # <s Trackers
-    _ctx_len, n_tokens = model.ctx_len, model.n_tokens
+    _ctx_win, vocab_sz = model.ctx_win, model.vocab_sz
     _batch_sz, n_batches = train_loader.batch_size, len(train_loader)
     batch_lim = min(max_batches, n_batches * max_epochs)
     patience_thresh *= (
@@ -383,9 +401,9 @@ def train(
         for batch_i, (x_train, y_train) in pbar:
             # <ss Model training.
             optimizer.zero_grad()
-            logits = model(x_train.to(device))  # -> [batch_sz, ctx_len, n_tokens], but...
+            logits: Float[Tensor, "batch_sz seq_len vocab_sz"] = model(x_train.to(device))  # type: ignore
             # must reshape to compare against batch_sz vector of targets for cross-entropy loss.
-            loss = loss_fn(logits.view(-1, n_tokens), y_train.to(device).view(-1))
+            loss = loss_fn(logits.view(-1, vocab_sz), y_train.to(device).view(-1))
             loss.backward()
             apply_gradient_centralization(optimizer)
             optimizer.step()
@@ -492,7 +510,7 @@ def generate(
     with t.no_grad():
         first_gen_idx, last_gen_idx = input_len - 1, input_len + n_tokens - 1
         for i in range(first_gen_idx, last_gen_idx):  # start gen after `input_len`
-            model_first_ctx = 0 if i < model.ctx_len else i - model.ctx_len + 1
+            model_first_ctx = 0 if i < model.ctx_win else i - model.ctx_win + 1
             logits = model(
                 x[model_first_ctx : (i + 1)].unsqueeze(0)
             )  # feed in `x` w/ batch_sz 1
@@ -575,8 +593,8 @@ if __name__ == "__main__":
     with files[2].open() as f:
         tokens = f.read()
     model = NanoGPT(
-        n_tokens=model_config["n_tokens"],
-        ctx_len=model_config["ctx_len"],
+        vocab_sz=model_config["vocab_sz"],
+        ctx_win=model_config["ctx_win"],
         n_blocks=model_config["n_blocks"],
         n_heads=model_config["n_heads"],
         head_dim=model_config["head_dim"],
