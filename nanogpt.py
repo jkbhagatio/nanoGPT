@@ -1,122 +1,218 @@
 """Code to build, train, and run NanoGPT."""
 
+# pylint: disable-next=syntax-error
+
 import argparse
 import json
 from pathlib import Path
 from warnings import warn
 
 import numpy as np
-import torch
-from torch import nn, optim
+import torch as t
+from jaxtyping import Float, Int
+from torch import Tensor, nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 # <s Transformer model classes
 
-class Head(nn.Module):
-    """Self-attention head."""
 
-    def __init__(self, head_sz, emb_dim):
-        """Initialize key, query, value."""
-        super().__init__()
-        self.head_sz, self.emb_dim = head_sz, emb_dim
-        self.key = nn.Linear(emb_dim, head_sz, bias=False)
-        self.query = nn.Linear(emb_dim, head_sz, bias=False)
-        self.value = nn.Linear(emb_dim, head_sz, bias=False)
+# class Head(nn.Module):
+#     """Self-attention head."""
 
-    def forward(self, x):
-        """Compute self-attention output."""
-        _batch_sz, ctx_len, _emb_dim = x.shape
-        q = self.query(x)
-        k = self.key(x)  # -> [batch_sz, ctx_len, head_sz]
-        v = self.value(x)
-        k_q_sim = q @ k.transpose(2, 1) / np.sqrt(self.head_sz)  # scaled attn to preserve k, q var
-        tril = torch.tril(torch.ones(ctx_len, ctx_len, device=x.device))  # mask: can't see future
-        k_q_sim = k_q_sim.masked_fill(tril == 0, float("-inf"))
-        attn_weights = F.softmax(k_q_sim, dim=2)
-        attn_out = attn_weights @ v  # weighted sum of values
-        # Note, if *not* using this in a MultiHead setting, we should project back to emb_dim
-        #proj = nn.Linear(head_sz, emb_dim)
-        #attn_out = proj(attn_out)
-        return attn_out
+#     def __init__(self, head_dim: int, emb_dim: int):
+#         """Initialize key, query, value matrices."""
+#         super().__init__()
+#         self.head_dim, self.emb_dim = head_dim, emb_dim
+#         self.key = nn.Linear(emb_dim, head_dim, bias=False)
+#         self.query = nn.Linear(emb_dim, head_dim, bias=False)
+#         self.value = nn.Linear(emb_dim, head_dim, bias=False)
+
+#     def forward(
+#         self,
+#         x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+#     ) -> Float[Tensor, "batch_sz seq_len head_dim"]:  # type: ignore
+#         """Compute self-attention output."""
+#         _batch_sz, seq_len, _emb_dim = x.shape
+#         q: Float[Tensor, "batch_sz seq_len head_dim"] = self.query(x)  # type: ignore
+#         k = self.key(x)
+#         v = self.value(x)
+#         k_q_sim: Float[Tensor, "batch_sz seq_len seq_len"] = (  # type: ignore
+#             q @ k.transpose(2, 1) / np.sqrt(self.head_dim)
+#         )  # scaled attn to preserve k, q var
+#         tril = t.tril(t.ones(seq_len, seq_len, device=x.device))  # mask: can't see future
+#         k_q_sim = k_q_sim.masked_fill(tril == 0, float("-inf"))
+#         # for each query token (dim=1), compute prob for all seq key tokens (dim=2)
+#         attn_weights = F.softmax(k_q_sim, dim=2)
+#         # get weighted sum of values
+#         attn_out: Float[Tensor, "batch_sz seq_len head_dim"] = attn_weights @ v  # type: ignore
+#         # Note, if *not* using this in MultiHead setting, we should proj back to emb_dim:
+#         # proj = nn.Linear(head_dim, emb_dim)
+#         # attn_out = proj(attn_out)
+#         return attn_out
+
+
+# class MultiHead(nn.Module):
+#     """Multi-head self-attention."""
+
+#     def __init__(self, n_heads: int, head_dim: int, emb_dim: int):
+#         """Initialize heads."""
+#         super().__init__()
+#         self.n_heads, self.head_dim, self.emb_dim = n_heads, head_dim, emb_dim
+#         self.heads = nn.ModuleList([Head(head_dim, emb_dim) for _ in range(n_heads)])
+#         self.proj = nn.Linear(self.n_heads * self.head_dim, self.emb_dim)
+
+#     def forward(
+#         self,
+#         x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+#     ) -> Float[Tensor, "batch_sz seq_len emb_dim"]:  # type: ignore
+#         """Compute multi-head self-attention output."""
+#         attn_outs = [head(x) for head in self.heads]
+#         # concatenate head dimension
+#         attn_out: Float[Tensor, "batch_sz seq_len emb_dim"] = t.cat(attn_outs, dim=2)  # type: ignore
+#         # use linear projection to mix info across heads
+#         attn_out = self.proj(attn_out)
+#         return attn_out
 
 
 class MultiHead(nn.Module):
     """Multi-head self-attention."""
 
-    def __init__(self, n_heads, head_sz, emb_dim):
-        """Initialize heads."""
+    def __init__(self, n_heads: int, head_dim: int, emb_dim: int):
+        """Initialize multi-head attention matrices."""
         super().__init__()
-        self.n_heads, self.head_sz, self.emb_dim = n_heads, head_sz, emb_dim
-        self.heads = nn.ModuleList([Head(head_sz, emb_dim) for _ in range(n_heads)])
-        self.proj = nn.Linear(self.n_heads * self.head_sz, self.emb_dim)  # projct back to `emb_dim`
+        self.n_heads, self.head_dim, self.emb_dim = n_heads, head_dim, emb_dim
+        self.n_heads_dim = n_heads * head_dim
 
-    def forward(self, x):
+        self.key = nn.Linear(emb_dim, self.n_heads_dim, bias=False)
+        self.query = nn.Linear(emb_dim, self.n_heads_dim, bias=False)
+        self.value = nn.Linear(emb_dim, self.n_heads_dim, bias=False)
+        self.proj = nn.Linear(self.n_heads_dim, emb_dim)
+
+    def forward(
+        self,
+        x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+    ) -> Float[Tensor, "batch_sz seq_len emb_dim"]:  # type: ignore
         """Compute multi-head self-attention output."""
-        attn_outs = [head(x) for head in self.heads]
-        attn_out = torch.cat(attn_outs, dim=2)  # concatenate across head dimension
-        attn_out = self.proj(attn_out)
+        batch_sz, seq_len, _emb_dim = x.shape
+
+        # Compute Q, K, V for all heads at once
+        q: Float[Tensor, "batch_sz seq_len n_heads_dim"] = self.query(x)  # type: ignore
+        k = self.key(x)
+        v = self.value(x)
+
+        # Reshape to separate heads
+        q: Float[Tensor, "batch_sz n_heads seq_len head_dim"] = q.view(  # type: ignore
+            batch_sz, seq_len, self.n_heads, self.head_dim
+        ).transpose(1, 2)
+        k = k.view(batch_sz, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_sz, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Compute attention scores
+        k_q_sim: Float[Tensor, "batch_sz n_heads seq_len seq_len"] = (  # type: ignore
+            q @ k.transpose(-2, -1) / np.sqrt(self.head_dim)
+        )
+
+        # Apply causal mask
+        tril = t.tril(t.ones(seq_len, seq_len, device=x.device))
+        k_q_sim = k_q_sim.masked_fill(tril == 0, float("-inf"))
+
+        # Apply softmax to get attention weights
+        attn_weights = F.softmax(k_q_sim, dim=-1)
+
+        # Get attn out per head, combine heads, and mix info across heads with linear proj
+        attn_out: Float[Tensor, "batch_sz n_heads seq_len head_dim"] = (  # type: ignore
+            attn_weights @ v
+        )
+        attn_out: Float[Tensor, "batch_sz seq_len n_heads_dim"] = (  # type: ignore
+            attn_out.transpose(1, 2).reshape(batch_sz, seq_len, self.n_heads_dim)
+        )
+        # Apply output projection
+        attn_out: Float[Tensor, "batch_sz seq_len emb_dim"] = self.proj(attn_out)
         return attn_out
 
 
 class Feedforward(nn.Module):
-    """Feedforward layer."""
+    """Feedforward layer.
 
-    def __init__(self, emb_dim, ff_dim):
+    "Linear layer sandwich" aka "inverted bottleneck":
+    Dim fans out by factor `ff_dim` then back to `emb_dim`.
+    Importantly, adds non-linearity (attn mechanism, besides softmax, is linear).
+    ReLU or GeLU is preferred over sigmoid or tanh, to combat vanishing gradients.
+    ("Position-wise Feed-Forward Networks" in "Attention is All You Need")
+    """
+
+    def __init__(self, emb_dim: int, ff_dim: int):
         """Initialize weights."""
         super().__init__()
-        # Linear layer ReLU sandwich: dim fans out by factor of `ff_dim` and then back to `emb_dim`.
-        # ("Position-wise Feed-Forward Networks" in "Attention is All You Need")
         self.layers = nn.Sequential(
-            nn.Linear(emb_dim, emb_dim * ff_dim), nn.ReLU(), nn.Linear(emb_dim * ff_dim, emb_dim)
+            nn.Linear(emb_dim, emb_dim * ff_dim),
+            nn.ReLU(),
+            nn.Linear(emb_dim * ff_dim, emb_dim),
         )
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+    ) -> Float[Tensor, "batch_sz seq_len emb_dim"]:  # type: ignore
         """Forward pass."""
         return self.layers(x)
 
 
 class Block(nn.Module):
-    """Transformer block: communication followed by computation."""
+    """Transformer block: communication followed by computation.
 
-    # Parts:
-    #  - Multi-head self-attention
-    #  - Position-wise feedforward network
-    #  - Residual connections
-    #  - Layer normalization (pre-norm formulation)
-    #  - ~ Weight normalization ~ (not for now)
-    #  - Dropout
+    Parts:
+     - Multi-head self-attention
+     - Position-wise feedforward network
+     - Residual connections
+     - Layer normalization (pre-norm formulation)
+     - ~ Weight normalization ~ (not for now)
+     - Dropout
+    """
 
-    def __init__(self, n_heads, head_sz, emb_dim, ff_dim, dropout):
-        """Self-attention -> position-wise feedforward, each sandwiched by layer norm & dropout."""
+    def __init__(
+        self, n_heads: int, head_dim: int, emb_dim: int, ff_dim: int, dropout: float
+    ):
+        """Self-attn -> pos-wise feedforward, each sandwiched by layer norm & dropout."""
         super().__init__()
-        self.n_heads, self.head_sz, self.emb_dim, self.ff_dim = n_heads, head_sz, emb_dim, ff_dim
+        self.n_heads, self.head_dim, self.emb_dim, self.ff_dim = (
+            n_heads,
+            head_dim,
+            emb_dim,
+            ff_dim,
+        )
         self.self_attn_ln = nn.LayerNorm(emb_dim)  # layer norm pre self-attention
-        self.self_attn = MultiHead(n_heads, head_sz, emb_dim)  # multi-head self-attention
+        self.self_attn = MultiHead(
+            n_heads, head_dim, emb_dim
+        )  # multi-head self-attention
         self.self_attn_dropout = nn.Dropout(dropout)  # dropout after self-attention
         self.ff_ln = nn.LayerNorm(emb_dim)  # layer norm pre feedforward
         self.ff = Feedforward(emb_dim, ff_dim)  # position-wise feedforward
         self.ff_dropout = nn.Dropout(dropout)  # dropout after feedforward
 
     def forward(self, x):
-        """Self-attention -> feedforward."""
-        # layer-norm -> self-attention -> dropout + residual
+        """Self-attn -> feedforward."""
+        # layer-norm -> self-attn -> dropout + residual
         x = x + self.self_attn_dropout(self.self_attn(self.self_attn_ln(x)))
         # layer-norm -> feedforward -> dropout + residual
         x = x + self.ff_dropout(self.ff(self.ff_ln(x)))
         return x
 
 
-"""Create NanoGPT: Decoder-only Transformer."""
+"""
+Create NanoGPT: Decoder-only Transformer.
 
-# In addition to our Transformer blocks, we need token embedding and positional embedding layers, to
-# compute the positional encodings that get passed to the attention units in the transformer blocks.
+In addition to our Transformer blocks, we need token embedding and positional embedding
+layers, to compute the positional encodings that get passed to the attention units in the
+transformer blocks.
 
-# We'll also apply weight init.
+We'll also apply weight init.
 
-# We want our output to be [batch_sz, ctx_len, n_tokens], because we want to predict the next token
-# for each token in the context.
+We want our output to be [batch_sz, seq_len, n_tokens], because we want to predict the next token
+for each token in the context.
+"""
 
 
 class NanoGPT(nn.Module):
@@ -127,32 +223,33 @@ class NanoGPT(nn.Module):
         n_tokens,
         ctx_len=512,
         n_blocks=8,
-        n_heads=10,
-        head_sz=64,
+        n_heads=8,
+        head_dim=64,
         emb_dim=512,
         ff_dim=4,
         dropout=0.1,
     ):
-        """Initialize token & positional embeddings, transformer blocks, & norm and out layers."""
+        """Init token & pos embeddings, transformer blocks, & norm and out layers."""
         super().__init__()
         (
             self.n_tokens,
             self.ctx_len,
             self.n_blocks,
             self.n_heads,
-            self.head_sz,
+            self.head_dim,
             self.emb_dim,
             self.ff_dim,
-        ) = (n_tokens, ctx_len, n_blocks, n_heads, head_sz, emb_dim, ff_dim)
-        if (n_heads * head_sz / emb_dim) != 1:
+        ) = (n_tokens, ctx_len, n_blocks, n_heads, head_dim, emb_dim, ff_dim)
+        if (n_heads * head_dim / emb_dim) != 1:
             warn(
-                f"Ratio of n_heads X head_sz to emb_dim ({(n_heads * head_sz / emb_dim)}) is not 1",
-                stacklevel=1
+                f"Ratio of n_heads X head_dim to emb_dim "
+                f"{(n_heads * head_dim / emb_dim)}) is not 1",
+                stacklevel=1,
             )
         self.tok_emb = nn.Embedding(n_tokens, emb_dim)  # to learn token embeddings
         self.pos_emb = nn.Embedding(ctx_len, emb_dim)  # to learn positional embeddings
         self.blocks = nn.Sequential(  # Transformer blocks
-            *[Block(n_heads, head_sz, emb_dim, ff_dim, dropout) for _ in range(n_blocks)]
+            *[Block(n_heads, head_dim, emb_dim, ff_dim, dropout) for _ in range(n_blocks)]
         )
         self.f_ln = nn.LayerNorm(emb_dim)  # final layer norm
         self.f_dropout = nn.Dropout(dropout)  # final dropout
@@ -166,19 +263,21 @@ class NanoGPT(nn.Module):
             nn.init.xavier_normal_(module.weight, gain=gain)
 
     def forward(self, x):
-        """Feed positional encodings through transformer blocks and final norm and out layers."""
-        _batch_sz, ctx_len = x.shape
+        """Feed pos encodings through transformer blocks and final norm and out layers."""
+        _batch_sz, seq_len = x.shape
         # Compute positional encodings
-        tok_emb = self.tok_emb(x)  # -> [batch_sz, ctx_len, emb_dim]
-        pos_emb = self.pos_emb.weight[0:ctx_len]  # -> [ctx_len, emb_dim]
-        pos_enc = tok_emb + pos_emb  # -> [batch_sz, ctx_len, emb_dim]
+        tok_emb = self.tok_emb(x)  # -> [batch_sz, seq_len, emb_dim]
+        pos_emb = self.pos_emb.weight[0:seq_len]  # -> [seq_len, emb_dim]
+        pos_enc = tok_emb + pos_emb  # -> [batch_sz, seq_len, emb_dim]
         # Go through transformer blocks and final linear layer
         logits = self.out(self.f_dropout(self.f_ln(self.blocks(pos_enc))))
         return logits
 
+
 # /s>
 
 # <s Data loading, training, config, and utility functions
+
 
 def build_dataset(txtfile, ctx_len):
     """Build dataset from text file."""
@@ -187,10 +286,10 @@ def build_dataset(txtfile, ctx_len):
     tokens = sorted(set(text))
     token_to_int = {t: i for i, t in enumerate(tokens)}
     encode = lambda tokens: [token_to_int[t] for t in tokens]
-    data = torch.tensor(encode(text), dtype=torch.long)
+    data = t.tensor(encode(text), dtype=t.long)
     n_chars = len(text)
     n_examples = n_chars - ctx_len
-    idxs = torch.arange(ctx_len + 1).unsqueeze(0) + torch.arange(n_examples).unsqueeze(1)
+    idxs = t.arange(ctx_len + 1).unsqueeze(0) + t.arange(n_examples).unsqueeze(1)
     X, Y = data[idxs[:, :-1]], data[idxs[:, 1:]]
     return X, Y
 
@@ -229,15 +328,16 @@ def train(
     optimizer: optim,  # optimizer
     loss_fn: nn.modules.loss,  # loss function
     max_epochs: int = 2,  # max n training epochs
-    max_batches: int = 1e9,  # max n batches to train
+    max_batches: int = 1_000_000_000,  # max n batches to train
     val_chk_interval: int = 200,  # check val loss every `val_chk_interval` batches and print losses
     val_iter: int = 5,  # number of batches on val_loader to run and avg when computing val loss
-    patience_thresh: int = 1e9,  # consecutive batches without val loss decrease for early stopping
+    patience_thresh: int = 1_000_000_000,  # consecutive batches without val loss decrease for early stopping
     save_chkpt_dir: str = "",  # dir to save model checkpoints
     save_chkpt_thresh: float = 0.5,  # save model chkpnt every `save_chkpt_interval` loss decrease
-) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:  # -> loss, train_losses, val_losses
+) -> tuple[Tensor, np.ndarray, np.ndarray]:  # -> loss, train_losses, val_losses
     """Trains a model, returns loss."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = t.device("cuda" if t.cuda.is_available() else "cpu")
+
     # <s Nested helper functions to make `train` more readable.
     def print_losses(epoch, batch_i, train_losses_avg, val_losses_avg):
         """Print current average losses."""
@@ -246,17 +346,12 @@ def train(
             f"Loss = {train_losses_avg[-1]:.3f}, Val Loss = {val_losses_avg[-1]:.3f}"
         )
 
-    @torch.no_grad()
+    @t.no_grad()
     def estimate_losses(
-        model,
-        val_loader,
-        val_losses,
-        val_losses_avg,
-        train_losses,
-        train_losses_avg
+        model, val_loader, val_losses, val_losses_avg, train_losses, train_losses_avg
     ):
         """Estimate losses on val_loader, and return val loss and train loss avg."""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = t.device("cuda" if t.cuda.is_available() else "cpu")
         model.eval()
         for val_i, (x_val, y_val) in enumerate(val_loader):
             logits = model(x_val.to(device))
@@ -267,13 +362,16 @@ def train(
         val_losses_avg.append(np.mean(val_losses[-val_iter:]))
         train_losses_avg.append(np.mean(train_losses[-val_chk_interval:]))
         model.train()
+
     # /s>
 
     # <s Trackers
-    _ctx_len, n_tokens  = model.ctx_len, model.n_tokens
+    _ctx_len, n_tokens = model.ctx_len, model.n_tokens
     _batch_sz, n_batches = train_loader.batch_size, len(train_loader)
     batch_lim = min(max_batches, n_batches * max_epochs)
-    patience_thresh *= val_chk_interval  # convert to batches within model validation block
+    patience_thresh *= (
+        val_chk_interval  # convert to batches within model validation block
+    )
     train_losses, val_losses, train_losses_avg, val_losses_avg = [], [], [], []
     init_loss, best_val_loss = float("inf"), float("inf")
     patience_ct = 0
@@ -297,13 +395,22 @@ def train(
             if val_chk_interval and batch_i % val_chk_interval == 0:
                 # Estimate and print losses.
                 estimate_losses(
-                    model, val_loader, val_losses, val_losses_avg, train_losses, train_losses_avg
+                    model,
+                    val_loader,
+                    val_losses,
+                    val_losses_avg,
+                    train_losses,
+                    train_losses_avg,
                 )
                 print_losses(epoch, batch_i, train_losses_avg, val_losses_avg)
-                pbar.set_postfix_str(f"Total Batch {(batch_i + 1) * (epoch + 1)} / {batch_lim}")
+                pbar.set_postfix_str(
+                    f"Total Batch {(batch_i + 1) * (epoch + 1)} / {batch_lim}"
+                )
                 # Patience check for early stopping.
                 patience_ct = (
-                    0 if val_losses_avg[-1] < best_val_loss else patience_ct + val_chk_interval
+                    0
+                    if val_losses_avg[-1] < best_val_loss
+                    else patience_ct + val_chk_interval
                 )
                 best_val_loss = min(best_val_loss, val_losses_avg[-1])
                 if patience_ct >= patience_thresh:
@@ -316,10 +423,12 @@ def train(
                 print_losses(epoch, batch_i, train_losses_avg, val_losses_avg)
                 return loss, train_losses_avg, val_losses_avg
             # Save checkpoint check.
-            if (Path(save_chkpt_dir).exists()) and (init_loss - loss.item() > save_chkpt_thresh):
-                torch.save(
+            if (Path(save_chkpt_dir).exists()) and (
+                init_loss - loss.item() > save_chkpt_thresh
+            ):
+                t.save(
                     model.state_dict(),
-                    Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth"
+                    Path(save_chkpt_dir) / f"model_chkpt_loss{loss.item():.3f}.pth",
                 )
                 init_loss = loss.item()
             # /ss> /s>
@@ -350,14 +459,14 @@ def generate(
     temp=1.0,
     top_k=None,
     seed=42,
-    print_gen=True
+    print_gen=True,
 ):
     """Generate text from a nanoGPT model."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = t.device("cuda" if t.cuda.is_available() else "cpu")
     # Set a random seed for generation
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    t.manual_seed(seed)
+    if t.cuda.is_available():
+        t.cuda.manual_seed_all(seed)
 
     # Create token_to_int, int_to_token dicts.
     token_to_int = {t: i for i, t in enumerate(tokens)}
@@ -370,30 +479,34 @@ def generate(
         in_tkns = encode(in_txt)
         input_len = len(in_tkns)
         # Initialize output starting with input text.
-        x = torch.zeros((input_len + n_tokens,), dtype=torch.long).to(device)
-        x[:input_len] = torch.tensor(in_tkns, dtype=torch.long).to(device)
+        x = t.zeros((input_len + n_tokens,), dtype=t.long).to(device)
+        x[:input_len] = t.tensor(in_tkns, dtype=t.long).to(device)
     else:
         # Initialize output starting with "\n".
-        x = torch.zeros((1 + n_tokens,), dtype=torch.long).to(device)
+        x = t.zeros((1 + n_tokens,), dtype=t.long).to(device)
         x[0] = token_to_int["\n"]
         input_len = 1
 
     # Run inference (generation) in eval mode
     model.eval()
-    with torch.no_grad():
+    with t.no_grad():
         first_gen_idx, last_gen_idx = input_len - 1, input_len + n_tokens - 1
         for i in range(first_gen_idx, last_gen_idx):  # start gen after `input_len`
             model_first_ctx = 0 if i < model.ctx_len else i - model.ctx_len + 1
-            logits = model(x[model_first_ctx:(i + 1)].unsqueeze(0))  # feed in `x` w/ batch_sz 1
-            # Get logits for just `len(tokens)` (squeeze out ctx_len), and scale by temp
+            logits = model(
+                x[model_first_ctx : (i + 1)].unsqueeze(0)
+            )  # feed in `x` w/ batch_sz 1
+            # Get logits for current last token (squeeze out seq_len), and scale by temp
             logits = logits[:, -1, :] / temp
             if top_k is not None:  # limit to top_k most likely tokens
                 top_vals, top_idxs = logits.topk(top_k, dim=1)
                 probs = F.softmax(top_vals, dim=1)  # compute top_k probs
-                next_tkn_int = top_idxs.gather(1, torch.multinomial(probs, 1))  # sample top_k probs
+                next_tkn_int = top_idxs.gather(
+                    1, t.multinomial(probs, 1)
+                )  # sample top_k probs
             else:
                 probs = F.softmax(logits, dim=1)  # compute probs for all tokens
-                next_tkn_int = torch.multinomial(probs, 1)  # sample from probs
+                next_tkn_int = t.multinomial(probs, 1)  # sample from probs
             x[i + 1] = next_tkn_int
             if print_gen:
                 print(int_to_token[next_tkn_int.item()], end="")
@@ -401,6 +514,8 @@ def generate(
     # Decode `x` and return it.
     decode = lambda ints: "".join([int_to_token[i] for i in ints])
     return decode(x.tolist())
+
+
 # /s>
 
 
@@ -416,21 +531,35 @@ if __name__ == "__main__":
     #   - `seed` for generate
     parser = argparse.ArgumentParser(description="Generate text with NanoGPT.")
     parser.add_argument(
-        "--model-dir", type=str, required=True, help="Path to model, model config, & tokens files."
+        "--model-dir",
+        type=str,
+        required=True,
+        help="Path to model, model config, & tokens files.",
     )
-    parser.add_argument("--in-txt", type=str, default=None, help="Input text for generation.")
-    parser.add_argument("--n-tokens", type=int, required=True, help="Number of tokens to generate.")
-    parser.add_argument("--temp", type=float, default=1.0, help="Temperature for generation.")
     parser.add_argument(
-        "--top-k", type=int, default=None, help="Top k tokens to sample from for generation."
+        "--in-txt", type=str, default=None, help="Input text for generation."
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for generation.")
+    parser.add_argument(
+        "--n-tokens", type=int, required=True, help="Number of tokens to generate."
+    )
+    parser.add_argument(
+        "--temp", type=float, default=1.0, help="Temperature for generation."
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top k tokens to sample from for generation.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for generation."
+    )
     args = parser.parse_args()
     # /s>
 
     # <s Configure model.
     print("Loading model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = t.device("cuda" if t.cuda.is_available() else "cpu")
     # Ensure model_dir exists, and that there is exactly 1 .pth file, 1 .json file, and 1 .txt file.
     model_dir = Path(args.model_dir)
     exts = ["*.pth", "*.json", "*.txt"]
@@ -450,11 +579,11 @@ if __name__ == "__main__":
         ctx_len=model_config["ctx_len"],
         n_blocks=model_config["n_blocks"],
         n_heads=model_config["n_heads"],
-        head_sz=model_config["head_sz"],
+        head_dim=model_config["head_dim"],
         emb_dim=model_config["emb_dim"],
         ff_dim=model_config["ff_dim"],
     ).to(device)
-    model.load_state_dict(torch.load(files[0], map_location=device))
+    model.load_state_dict(t.load(files[0], map_location=device))
     model.eval()
     # s>
 
@@ -468,6 +597,6 @@ if __name__ == "__main__":
         temp=args.temp,
         top_k=args.top_k,
         seed=args.seed,
-        print_gen=True
+        print_gen=True,
     )
     # /s>

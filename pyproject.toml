@@ -20,9 +20,11 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "black[jupyter]",
+    "einops",
     "ipdb",
     "ipykernel",
     "isort",
+    "jaxtyping",
     "jupyter",
     "jupyterlab",
     "matplotlib",
@@ -82,9 +84,10 @@ multi_line_output = 2
 
 [tool.ruff]
 select = ["E", "W", "F", "I", "D", "UP", "S", "B", "A", "C4", "ICN", "PIE", "PT", "SIM", "PL"]
-line-length = 100
+line-length = 90
 ignore = [
     "E201", "E202", "E203", "E231", "E731", "E702",
+    "F722",
     "S101",
     "PT013",
     "PLR0912", "PLR0913", "PLR0915"
@@ -98,6 +101,8 @@ extend-exclude = [".git", ".github", ".idea", ".vscode"]
 convention = "google"
 
 [tool.pyright]
+# reportGeneralTypeIssues = "none"
+# reportUndefinedVariable = "none"
 reportMissingImports = "none"
 reportImportCycles = "error"
 reportUnusedImport = "error"

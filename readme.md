@@ -10,10 +10,9 @@ A trained nanoGPT using this codebase acts only as a character-level text-comple
 
 Multi-head self-attention is implemented "from scratch", at the level of pytorch tensors. These "self-attention units" are combined in "transformer blocks", which are then used in the nanoGPT model class.
 
-While the overall architecture is similar, this nanoGPT makes departures from Karpathy's nanoGPT in: naming conventions, data loading and training configuration, projecting embedding dimensions to attention heads, the format of operations in self-attention units and transformer blocks, output model generation (by adding parameters such as `temp` and `top_k`), and more.
+While the overall architecture is similar, this nanoGPT makes departures from Karpathy's nanoGPT in: naming conventions, data loading and training configuration, projecting embedding dimensions to attention heads, the format of operations in self-attention units and transformer blocks, output model generation (by adding temperature, top_k sampling, top_p sampling, a KV Cache, beam search, etc.), and more.
 
-Additionally, examples of distributed training of models across multiple GPUs using PyTorch
-Distributed Data Parallel (DDP) and Fully Sharded Data Parallel (FSDP) via Slurm can be found in the `ddp_and_fsdp` directory.
+Additionally, examples of distributed training of models across multiple GPUs using PyTorch Distributed Data Parallel (DDP) and Fully Sharded Data Parallel (FSDP) via Slurm can be found in the `ddp_and_fsdp` directory.
 
 ## Examples
 
