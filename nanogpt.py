@@ -352,7 +352,7 @@ def train(
     patience_thresh: int = 1_000_000_000,  # consecutive batches without val loss decrease for early stopping
     save_chkpt_dir: str = "",  # dir to save model checkpoints
     save_chkpt_thresh: float = 0.5,  # save model chkpnt every `save_chkpt_interval` loss decrease
-) -> tuple[Tensor, np.ndarray, np.ndarray]:  # -> loss, train_losses, val_losses
+) -> tuple[Tensor, list, list]:  # -> loss, train_losses, val_losses
     """Trains a model, returns loss."""
     device = t.device("cuda" if t.cuda.is_available() else "cpu")
 
@@ -402,13 +402,16 @@ def train(
             # <ss Model training.
             optimizer.zero_grad()
             logits: Float[Tensor, "batch_sz seq_len vocab_sz"] = model(x_train.to(device))  # type: ignore
-            # must reshape to compare against batch_sz vector of targets for cross-entropy loss.
+            # t.nn.CrossEntropyLoss requires 2d (batch_sz, n_class) logits and 1d labels,
+            # so we must reshape logits and labels.
             loss = loss_fn(logits.view(-1, vocab_sz), y_train.to(device).view(-1))
             loss.backward()
             apply_gradient_centralization(optimizer)
             optimizer.step()
             train_losses.append(loss.item())
+
             # /ss>
+
             # <ss Model validation.
             if val_chk_interval and batch_i % val_chk_interval == 0:
                 # Estimate and print losses.
@@ -452,8 +455,8 @@ def train(
             # /ss> /s>
 
     print("Finished training:")
-    print_losses(epoch, batch_i, train_losses_avg, val_losses_avg)
-    return loss, train_losses_avg, val_losses_avg
+    print_losses(epoch, batch_i, train_losses_avg, val_losses_avg)  # type: ignore
+    return loss, train_losses_avg, val_losses_avg  # type: ignore
 
 
 def print_model_summary(model):
