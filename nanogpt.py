@@ -9,7 +9,7 @@ from warnings import warn
 
 import numpy as np
 import torch as t
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
@@ -473,15 +473,16 @@ def print_model_summary(model):
 
 
 def generate(
-    model,
-    tokens,
-    in_txt=None,
-    n_tokens=100,
-    temp=1.0,
-    top_k=None,
-    seed=42,
-    print_gen=True,
-):
+    model: nn.Module,
+    tokens: list[str],
+    in_txt: str | None = None,
+    n_tokens: int = 100,
+    temp: float = 1.0,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    seed: int = 42,
+    print_gen: bool = True,
+) -> str:
     """Generate text from a nanoGPT model."""
     device = t.device("cuda" if t.cuda.is_available() else "cpu")
     # Set a random seed for generation
@@ -514,17 +515,37 @@ def generate(
         first_gen_idx, last_gen_idx = input_len - 1, input_len + n_tokens - 1
         for i in range(first_gen_idx, last_gen_idx):  # start gen after `input_len`
             model_first_ctx = 0 if i < model.ctx_win else i - model.ctx_win + 1
-            logits = model(
-                x[model_first_ctx : (i + 1)].unsqueeze(0)
-            )  # feed in `x` w/ batch_sz 1
+            # Feed in `x` w/ batch_sz 1
+            logits: Float[Tensor, "batch_sz seq_len vocab_sz"] = (  # type: ignore
+                model(x[model_first_ctx : (i + 1)].unsqueeze(0))
+            )
             # Get logits for current last token (squeeze out seq_len), and scale by temp
-            logits = logits[:, -1, :] / temp
+            logits: Float[Tensor, "batch_sz vocab_sz"] = logits[:, -1, :] / temp
             if top_k is not None:  # limit to top_k most likely tokens
                 top_vals, top_idxs = logits.topk(top_k, dim=1)
                 probs = F.softmax(top_vals, dim=1)  # compute top_k probs
                 next_tkn_int = top_idxs.gather(
                     1, t.multinomial(probs, 1)
                 )  # sample top_k probs
+            elif top_p is not None:  # nucleus sampling
+                probs: Float[Tensor, "batch_sz vocab_sz"] = F.softmax(logits, dim=1)  # type: ignore
+                sorted_probs: Float[Tensor, "batch_sz vocab_sz"]  # type: ignore
+                sorted_idxs: Int[Tensor, "batch_sz vocab_sz"]  # type: ignore
+                sorted_probs, sorted_idxs = t.sort(probs, descending=True, dim=1)  # type: ignore
+                cumulative_probs: Float[Tensor, "batch_sz vocab_sz"] = (  # type: ignore
+                    t.cumsum(sorted_probs, dim=1)
+                )
+                # Find indices where cumulative probability exceeds top_p
+                nucleus_mask: Bool[Tensor, "batch_sz vocab_sz"] = cumulative_probs > top_p  # type: ignore
+                # Keep at least one token (the most likely)
+                nucleus_mask[:, 0] = False
+                # Zero out probabilities outside nucleus
+                sorted_probs[nucleus_mask] = 0.0
+                # Renormalize probabilities
+                sorted_probs = sorted_probs / sorted_probs.sum(dim=1, keepdim=True)
+                # Sample from the nucleus
+                sampled_sorted_idx = t.multinomial(sorted_probs, 1)
+                next_tkn_int = sorted_idxs.gather(1, sampled_sorted_idx)
             else:
                 probs = F.softmax(logits, dim=1)  # compute probs for all tokens
                 next_tkn_int = t.multinomial(probs, 1)  # sample from probs
