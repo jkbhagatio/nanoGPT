@@ -142,15 +142,14 @@ class MultiHead(nn.Module):
         # masks out only future tokens in the current sequence.
         full_seq_len = k.shape[2]
         cur_pos = full_seq_len - seq_len
-        if cur_pos > 0:  # TODO: allow cached tokens
+        if cur_pos > 0:
             mask = t.ones(seq_len, full_seq_len, device=x.device)
-            mask = mask.tril(diagonal=cur_pos - 1)
-            k_q_sim = k_q_sim[:, :, cur_pos:, : cur_pos + seq_len]
+            tril = t.tril(t.ones(seq_len, full_seq_len, device=x.device))
+            mask[:, :cur_pos] = tril  # mask out future tokens
         else:  # standard causal mask
-            mask = t.ones(seq_len, seq_len, device=x.device)
-            mask = mask.tril()
-        tril = t.tril(t.ones(seq_len, seq_len, device=x.device))
-        k_q_sim = k_q_sim.masked_fill(tril == 0, float("-inf"))
+            mask = t.tril(t.ones(seq_len, full_seq_len, device=x.device))
+
+        k_q_sim = k_q_sim.masked_fill(mask == 0, float("-inf"))
 
         # Apply softmax to get attention weights
         attn_weights = F.softmax(k_q_sim, dim=-1)
