@@ -1,6 +1,7 @@
 """Code to build, train, and run NanoGPT."""
 
 import argparse
+from hmac import new
 import json
 from pathlib import Path
 from warnings import warn
@@ -83,11 +84,12 @@ class _MultiHead(nn.Module):  # type: ignore
 class MultiHead(nn.Module):
     """Multi-head self-attention."""
 
-    def __init__(self, n_heads: int, head_dim: int, emb_dim: int):
+    def __init__(self, n_heads: int, head_dim: int, emb_dim: int, max_cache_len: int):
         """Initialize multi-head attention matrices."""
         super().__init__()
         self.n_heads, self.head_dim, self.emb_dim = n_heads, head_dim, emb_dim
         self.n_heads_dim = n_heads * head_dim
+        self.max_cache_len = max_cache_len
 
         self.key = nn.Linear(emb_dim, self.n_heads_dim, bias=False)
         self.query = nn.Linear(emb_dim, self.n_heads_dim, bias=False)
@@ -97,6 +99,12 @@ class MultiHead(nn.Module):
     def forward(
         self,
         x: Float[Tensor, "batch_sz seq_len emb_dim"],  # type: ignore
+        kv_cache: tuple[
+            Float[Tensor, "batch_sz n_heads seq_len head_dim"],  # type: ignore
+            Float[Tensor, "batch_sz n_heads seq_len head_dim"],  # type: ignore
+        ]
+        | None = None,
+        use_cache: bool = False,
     ) -> Float[Tensor, "batch_sz seq_len emb_dim"]:  # type: ignore
         """Compute multi-head self-attention output."""
         batch_sz, seq_len, _emb_dim = x.shape
@@ -113,12 +121,34 @@ class MultiHead(nn.Module):
         k = k.view(batch_sz, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_sz, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
+        # Handle KV cache with sliding window before computing attention
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            # concatenate past K and V along seq_len dim
+            k = t.cat([past_k, k], dim=2)
+            v = t.cat([past_v, v], dim=2)
+            # apply sliding window
+            if k.shape[2] > self.max_cache_len:
+                k = k[:, :, -self.max_cache_len :, :]
+                v = v[:, :, -self.max_cache_len :, :]
+        new_cache = (k, v) if use_cache else None
+
         # Compute attention scores
         k_q_sim: Float[Tensor, "batch_sz n_heads seq_len seq_len"] = (  # type: ignore
             q @ k.transpose(-2, -1) / np.sqrt(self.head_dim)
         )
 
-        # Apply causal mask
+        # Apply causal mask: create a mask that allows attention to cached tokens and
+        # masks out only future tokens in the current sequence.
+        full_seq_len = k.shape[2]
+        cur_pos = full_seq_len - seq_len
+        if cur_pos > 0:  # TODO: allow cached tokens
+            mask = t.ones(seq_len, full_seq_len, device=x.device)
+            mask = mask.tril(diagonal=cur_pos - 1)
+            k_q_sim = k_q_sim[:, :, cur_pos:, : cur_pos + seq_len]
+        else:  # standard causal mask
+            mask = t.ones(seq_len, seq_len, device=x.device)
+            mask = mask.tril()
         tril = t.tril(t.ones(seq_len, seq_len, device=x.device))
         k_q_sim = k_q_sim.masked_fill(tril == 0, float("-inf"))
 
@@ -526,10 +556,8 @@ def generate(
             logits: Float[Tensor, "batch_sz vocab_sz"] = logits[:, -1, :] / temp  # type: ignore
             if top_k is not None:  # limit to top_k most likely tokens
                 top_vals, top_idxs = logits.topk(top_k, dim=1)
-                # compute top_k probabilities
-                probs: Float[Tensor, "batch_sz top_k"] = F.softmax(top_vals, dim=1)  # type: ignore
-                # sample from top_k probs
-                next_tkn_int = top_idxs.gather(1, t.multinomial(probs, 1))
+                probs = F.softmax(top_vals, dim=1)  # compute top_k probs
+                next_tkn_int = top_idxs.gather(1, t.multinomial(probs, 1))  # sample
             elif top_p is not None:  # nucleus sampling
                 probs: Float[Tensor, "batch_sz vocab_sz"] = F.softmax(logits, dim=1)  # type: ignore
                 sorted_probs: Float[Tensor, "batch_sz vocab_sz"]  # type: ignore
